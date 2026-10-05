@@ -16,7 +16,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set the TOC version from the tag
-        run: sed -i "s/^## Version: .*/## Version: ${GITHUB_REF_NAME#v}/" BetterDamageText/BetterDamageText.toc
+        # block scalar: the ": " inside the sed pattern would break plain YAML
+        run: |
+          sed -i "s/^## Version: .*/## Version: ${GITHUB_REF_NAME#v}/" BetterDamageText/BetterDamageText.toc
 
       - name: List bundled fonts
         run: sh tools/update-fonts.sh
