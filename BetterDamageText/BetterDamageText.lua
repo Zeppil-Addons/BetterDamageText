@@ -51,7 +51,7 @@ ns.defaults = defaults
 -- Where players send bug reports and ideas. Shown in the settings window and
 -- by /bdt feedback. The game can't open a browser, so it goes in a box the
 -- player can copy from.
-ns.FEEDBACK_URL = "https://github.com/hsmfromage/BetterDamageText/issues"
+ns.FEEDBACK_URL = "https://github.com/Zeppil-Addons/BetterDamageText/issues"
 
 local AUTO_ATTACK_ID = 6603
 

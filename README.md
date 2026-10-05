@@ -65,7 +65,7 @@ WoW: Forever doesn't let addons read the combat log, so no addon can be told dir
 
 ## Feedback and bug reports
 
-Found a bug or have an idea? Open an issue at https://github.com/hsmfromage/BetterDamageText/issues, or leave a comment on the CurseForge page. In game, type `/bdt feedback` to get the link ready to copy.
+Found a bug or have an idea? Open an issue at https://github.com/Zeppil-Addons/BetterDamageText/issues, or leave a comment on the CurseForge page. In game, type `/bdt feedback` to get the link ready to copy.
 
 For bugs, please include:
 1. What you expected and what you saw.

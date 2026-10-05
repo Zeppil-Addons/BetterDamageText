@@ -2,7 +2,7 @@
 ## Title: Better Damage Text
 ## Notes: Full control over your floating damage text, with the icon of the spell behind every hit.
 ## Author: Zeppil
-## X-Website: https://github.com/hsmfromage/BetterDamageText
+## X-Website: https://github.com/Zeppil-Addons/BetterDamageText
 ## Version: 1.0.2
 ## SavedVariables: BetterDamageTextDB, BetterDamageTextLearned, BetterDamageTextLog
 ## IconTexture: Interface\AddOns\BetterDamageText\icon.png
