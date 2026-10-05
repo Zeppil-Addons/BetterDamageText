@@ -1,0 +1,27 @@
+# Builds the addon zip and publishes a GitHub release whenever a version tag
+# is pushed, e.g.  git tag v1.0.1 && git push origin v1.0.1
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set the TOC version from the tag
+        run: sed -i "s/^## Version: .*/## Version: ${GITHUB_REF_NAME#v}/" BetterDamageText/BetterDamageText.toc
+
+      - name: Zip the addon folder
+        run: zip -r "BetterDamageText-${GITHUB_REF_NAME}.zip" BetterDamageText
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "BetterDamageText-${GITHUB_REF_NAME}.zip" --title "Better Damage Text ${GITHUB_REF_NAME}" --generate-notes
