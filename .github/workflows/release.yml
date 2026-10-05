@@ -18,6 +18,9 @@ jobs:
       - name: Set the TOC version from the tag
         run: sed -i "s/^## Version: .*/## Version: ${GITHUB_REF_NAME#v}/" BetterDamageText/BetterDamageText.toc
 
+      - name: List bundled fonts
+        run: sh tools/update-fonts.sh
+
       - name: Zip the addon folder
         run: zip -r "BetterDamageText-${GITHUB_REF_NAME}.zip" BetterDamageText
 

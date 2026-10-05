@@ -4,7 +4,7 @@
 
 local ADDON, ns = ...
 
--- Your own fonts go in this folder; type the file name in the settings window.
+-- Fonts bundled with the addon (listed in FontList.lua by tools/update-fonts.sh)
 local CUSTOM_FONT_FOLDER = "Interface\\AddOns\\" .. ADDON .. "\\Fonts\\"
 
 -- Fonts that ship with the game. Not every client has all of them, so the
@@ -33,17 +33,28 @@ end
 -- LibSharedMedia (ElvUI, Details, SharedMedia packs...).
 local function BuildFontList()
     local list, seen = {}, {}
-    local function Add(path, name)
-        local key = path and path:lower()
-        if key and not seen[key] and FontExists(path) then
+    local function Add(path, name, check)
+        local key = type(path) == "string" and path:lower()
+        if key and not seen[key] and (not check or FontExists(path)) then
             seen[key] = true
             table.insert(list, { path, name })
         end
     end
-    for _, f in ipairs(GAME_FONTS) do Add(f[1], f[2]) end
+    -- fonts shipped in our Fonts folder (FontList.lua), named after the file:
+    -- "LuckiestGuy-Regular.ttf" -> "Luckiest Guy", "PassionOne-Black.ttf" -> "Passion One Black".
+    -- Always listed: they're in the download, but the game only loads new font
+    -- files after a full restart, so a load check could hide them.
+    local bundled = {}
+    for _, file in ipairs(ns.bundledFonts or {}) do
+        local name = file:gsub("%.[Tt][Tt][Ff]$", ""):gsub("%-Regular$", ""):gsub("[-_]", " "):gsub("(%l)(%u)", "%1 %2")
+        table.insert(bundled, { CUSTOM_FONT_FOLDER .. file, name })
+    end
+
+    for _, f in ipairs(GAME_FONTS) do Add(f[1], f[2], true) end
+    for _, f in ipairs(bundled) do Add(f[1], f[2], false) end
     local lsm = LibStub and LibStub("LibSharedMedia-3.0", true)
     if lsm then
-        for _, name in ipairs(lsm:List("font")) do Add(lsm:Fetch("font", name), name) end
+        for _, name in ipairs(lsm:List("font")) do Add(lsm:Fetch("font", name), name, true) end
     end
     return list
 end
@@ -60,6 +71,7 @@ local ICON_SIDES = {
 }
 
 local window
+local feedbackBox     -- the box holding the feedback link; see ns.ShowFeedback
 local refreshers = {} -- functions that update each control from the saved settings
 local Refresh         -- defined below; updates every control
 
@@ -225,43 +237,35 @@ local function ColorSwatch(parent, x, y, text, key)
     table.insert(refreshers, function() fill:SetVertexColor(unpack(ns.db[key])) end)
 end
 
--- Text box for a font file the player put in the addon's Fonts folder
-local function CustomFont(parent, x, y)
-    Label(parent, "Your own font (file in " .. ADDON .. "\\Fonts)", x, y)
-
+-- A box holding a link for the player to copy. Clicking it selects the whole
+-- link, ready for Ctrl+C: the game can't open a browser itself. Typing in it
+-- does nothing, so the link can't be lost.
+local function CopyBox(parent, width, text)
     local box = CreateFrame("EditBox", nil, parent, "InputBoxTemplate")
-    box:SetPoint("TOPLEFT", x + 6, y - 20)
-    box:SetSize(150, 22)
+    box:SetSize(width, 20)
     box:SetAutoFocus(false)
-    box:SetText("e.g. pepsi.ttf")
+    box:SetFontObject(GameFontHighlightSmall)
+    box:SetText(text)
+    box:SetCursorPosition(0)
 
-    local status = parent:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
-    status:SetPoint("LEFT", box, "RIGHT", 54, 0)
-
-    local use = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
-    use:SetPoint("LEFT", box, "RIGHT", 4, 0)
-    use:SetSize(46, 22)
-    use:SetText("Use")
-
-    local function Apply()
-        local file = strtrim(box:GetText() or "")
-        local path = CUSTOM_FONT_FOLDER .. file
-        if file ~= "" and FontExists(path) then
-            ns.db.font = path
-            status:SetText("|cff55ff55ok|r")
-            Refresh()
-            QueuePreview()
-        else
-            status:SetText("|cffff5555not found|r")
-        end
-        box:ClearFocus()
+    local function SelectAll(self)
+        self:SetText(text) -- undo anything typed over it
+        self:HighlightText()
     end
-    use:SetScript("OnClick", Apply)
-    box:SetScript("OnEnterPressed", Apply)
-    box:SetScript("OnEscapePressed", box.ClearFocus)
-    box:SetScript("OnEditFocusGained", function(self)
-        if self:GetText() == "e.g. pepsi.ttf" then self:SetText("") end
+    box:SetScript("OnEditFocusGained", SelectAll)
+    box:SetScript("OnMouseUp", SelectAll)
+    box:SetScript("OnTextChanged", function(self, userInput)
+        if userInput then SelectAll(self) end
     end)
+    box:SetScript("OnEscapePressed", box.ClearFocus)
+    box:SetScript("OnEnterPressed", box.ClearFocus)
+    box:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("Click, then press Ctrl+C to copy. Paste it in your browser.", 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    box:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    return box
 end
 
 ---------------------------------------------------------------------------
@@ -280,9 +284,48 @@ local function ResetToDefaults()
     ns.Preview()
 end
 
+-- One-click looks. A preset sets every appearance setting: anything it doesn't
+-- list goes back to the default. Behaviour settings (only my hits, etc.) are left alone.
+local LOOK_SETTINGS = {
+    "font", "outline", "shadow", "fontSize", "critScale", "critPop",
+    "animation", "duration", "rise",
+    "showIcon", "showMeleeIcon", "iconSide", "iconSize", "colorMelee", "colorSpell",
+}
+
+local PRESETS = {
+    { name = "Blizzard", values = {} }, -- the defaults
+    { name = "Big & Bold", values = {
+        font = CUSTOM_FONT_FOLDER .. "LuckiestGuy-Regular.ttf", outline = "THICKOUTLINE", shadow = true,
+        fontSize = 34, critScale = 1.9, critPop = 3.5, animation = "pop", duration = 1.6, rise = 40, iconSize = 34,
+    } },
+    { name = "Fountain", values = {
+        font = CUSTOM_FONT_FOLDER .. "Bangers-Regular.ttf", shadow = true,
+        fontSize = 30, critScale = 1.8, animation = "fountain", duration = 1.5, rise = 90, iconSize = 28,
+    } },
+    { name = "Arcade", values = {
+        font = CUSTOM_FONT_FOLDER .. "TitanOne-Regular.ttf", outline = "THICKOUTLINE",
+        fontSize = 28, critScale = 2.0, critPop = 4.0, animation = "scatter", duration = 1.3, rise = 80,
+        iconSize = 28, colorSpell = { 1, 0.55, 0.1 },
+    } },
+    { name = "Minimal", values = {
+        font = "Fonts\\ARIALN.TTF", fontSize = 20, critScale = 1.4, critPop = 2.0,
+        duration = 1.0, rise = 50, iconSize = 18, showMeleeIcon = false,
+    } },
+}
+
+local function ApplyPreset(preset)
+    for _, key in ipairs(LOOK_SETTINGS) do
+        local v = preset.values[key]
+        if v == nil then v = ns.defaults[key] end
+        ns.db[key] = type(v) == "table" and CopyTable(v) or v
+    end
+    Refresh()
+    ns.Preview()
+end
+
 local function BuildWindow()
     window = CreateFrame("Frame", "BetterDamageTextOptions", UIParent, "BasicFrameTemplateWithInset")
-    window:SetSize(560, 560)
+    window:SetSize(560, 650)
     window:SetPoint("CENTER")
     window:SetFrameStrata("DIALOG")
     window:SetMovable(true)
@@ -305,40 +348,54 @@ local function BuildWindow()
     local fmtX = function(v) return string.format("%.1fx", v) end
     local fmtSec = function(v) return string.format("%.1fs", v) end
 
+    -- presets across the top
+    Header(window, "Presets", 20, -36)
+    for i, preset in ipairs(PRESETS) do
+        local b = CreateFrame("Button", nil, window, "UIPanelButtonTemplate")
+        b:SetPoint("TOPLEFT", 20 + (i - 1) * 104, -60)
+        b:SetSize(98, 24)
+        b:SetText(preset.name)
+        b:SetScript("OnClick", function() ApplyPreset(preset) end)
+    end
+
     -- left column
     local L = 20
-    Header(window, "Text", L, -36)
-    Choice(window, L, -64, "Font", "font", BuildFontList())
-    CustomFont(window, L, -112)
-    Choice(window, L, -160, "Outline", "outline", OUTLINES)
-    Check(window, L, -208, "Drop shadow", "shadow")
-    Slider(window, L, -236, "Font size", "fontSize", 10, 60, 1, fmtInt)
-    Slider(window, L, -284, "Crit size", "critScale", 1, 3, 0.1, fmtX)
-    Slider(window, L, -332, "Crit pop (starting size)", "critPop", 1, 5, 0.1, fmtX)
+    Header(window, "Text", L, -100)
+    Choice(window, L, -128, "Font", "font", BuildFontList())
+    Choice(window, L, -176, "Outline", "outline", OUTLINES)
+    Check(window, L, -224, "Drop shadow", "shadow")
+    Slider(window, L, -252, "Font size", "fontSize", 10, 60, 1, fmtInt)
+    Slider(window, L, -300, "Crit size", "critScale", 1, 3, 0.1, fmtX)
+    Slider(window, L, -348, "Crit pop (starting size)", "critPop", 1, 5, 0.1, fmtX)
 
-    Header(window, "Animation", L, -384)
-    Slider(window, L, -412, "Time on screen", "duration", 0.5, 3, 0.1, fmtSec)
-    Slider(window, L, -460, "Float distance", "rise", 0, 200, 5, fmtInt)
+    Header(window, "Animation", L, -400)
+    Choice(window, L, -428, "Style", "animation", ns.ANIMATIONS)
+    Slider(window, L, -476, "Time on screen", "duration", 0.5, 3, 0.1, fmtSec)
+    Slider(window, L, -524, "Distance", "rise", 0, 200, 5, fmtInt)
 
     -- right column
     local R = 300
-    Header(window, "Icon", R, -36)
-    Check(window, R, -64, "Show spell icon", "showIcon")
-    Check(window, R, -90, "Icon on white hits too", "showMeleeIcon")
-    Choice(window, R, -118, "Icon position", "iconSide", ICON_SIDES)
-    Slider(window, R, -166, "Icon size", "iconSize", 10, 60, 1, fmtInt)
+    Header(window, "Icon", R, -100)
+    Check(window, R, -128, "Show spell icon", "showIcon")
+    Check(window, R, -154, "Icon on white hits too", "showMeleeIcon")
+    Choice(window, R, -182, "Icon position", "iconSide", ICON_SIDES)
+    Slider(window, R, -230, "Icon size", "iconSize", 10, 60, 1, fmtInt)
 
-    Header(window, "Colours", R, -218)
-    ColorSwatch(window, R, -246, "Melee (white hits)", "colorMelee")
-    ColorSwatch(window, R, -276, "Spells and procs", "colorSpell")
+    Header(window, "Colours", R, -282)
+    ColorSwatch(window, R, -310, "Melee (white hits)", "colorMelee")
+    ColorSwatch(window, R, -340, "Spells and procs", "colorSpell")
 
-    Header(window, "Show", R, -318)
-    Check(window, R, -346, "Misses, dodges, parries", "showAvoids")
-    Check(window, R, -372, "(blocked), (glancing)... labels", "showSuffixes")
-    Check(window, R, -398, "Only my hits", "onlyMine")
-    Check(window, R + 20, -424, "Instant (skip threat wait when sure)", "instant")
-    Check(window, R, -450, "Hide Blizzard's damage numbers", "hideBlizzard",
+    Header(window, "Show", R, -382)
+    Check(window, R, -410, "Misses, dodges, parries", "showAvoids")
+    Check(window, R, -436, "(blocked), (glancing)... labels", "showSuffixes")
+    Check(window, R, -462, "Hide Blizzard's damage numbers", "hideBlizzard",
         function() ns.ApplyBlizzardSetting(true) end)
+    Check(window, R, -488, "Minimap button", "minimapButton", ns.UpdateMinimapButton)
+
+    Header(window, "Feedback", R, -520)
+    Label(window, "Found a bug or have an idea?", R, -546)
+    feedbackBox = CopyBox(window, 222, ns.FEEDBACK_URL)
+    feedbackBox:SetPoint("TOPLEFT", R + 10, -566) -- the template draws its border 10px left of the box
 
     local preview = CreateFrame("Button", nil, window, "UIPanelButtonTemplate")
     preview:SetPoint("BOTTOMRIGHT", -20, 18)
@@ -361,6 +418,20 @@ function ns.OpenOptions()
     if not window then BuildWindow() end
     Refresh()
     window:Show()
+end
+
+function ns.ToggleOptions()
+    if window and window:IsShown() then
+        window:Hide()
+    else
+        ns.OpenOptions()
+    end
+end
+
+-- Opens the settings with the feedback link selected, ready for Ctrl+C.
+function ns.ShowFeedback()
+    ns.OpenOptions()
+    feedbackBox:SetFocus()
 end
 
 ---------------------------------------------------------------------------
@@ -393,6 +464,13 @@ loader:SetScript("OnEvent", function()
         if SettingsPanel then HideUIPanel(SettingsPanel) end
         ns.OpenOptions()
     end)
+
+    local feedback = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    feedback:SetPoint("TOPLEFT", open, "BOTTOMLEFT", 0, -24)
+    feedback:SetText("Found a bug or have an idea? Copy this link into your browser:")
+
+    local link = CopyBox(panel, 360, ns.FEEDBACK_URL)
+    link:SetPoint("TOPLEFT", feedback, "BOTTOMLEFT", 10, -8)
 
     pcall(function()
         local category = Settings.RegisterCanvasLayoutCategory(panel, "Better Damage Text")

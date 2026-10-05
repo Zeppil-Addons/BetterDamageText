@@ -1,9 +1,14 @@
 ## Interface: 16001
 ## Title: Better Damage Text
-## Notes: Floating damage numbers with the icon of the spell that caused each hit, only for your own damage.
-## Author: Muke
-## Version: 1.0.0
-## SavedVariables: BetterDamageTextDB, BetterDamageTextLog
+## Notes: Full control over your floating damage text, with the icon of the spell behind every hit.
+## Author: Zeppil
+## X-Website: https://github.com/hsmfromage/BetterDamageText
+## Version: 1.0.2
+## SavedVariables: BetterDamageTextDB, BetterDamageTextLearned, BetterDamageTextLog
+## IconTexture: Interface\AddOns\BetterDamageText\icon.png
+## X-Curse-Project-ID: 1725566
 
 BetterDamageText.lua
+FontList.lua
 Options.lua
+Minimap.lua

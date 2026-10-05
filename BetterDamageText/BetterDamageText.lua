@@ -10,6 +10,9 @@
 --   our buffs / weapon        - Lightning Shield, Flametongue... (read out of combat)
 --   our threat on the target  - only our own damage raises it
 --
+-- A hit is only shown when it's provably ours: our threat rose for it, or its
+-- timing, school and amount all match one of our casts, DoTs, procs or shields.
+--
 -- Timing facts measured in game (Forever 1.60.1), which the rules below rely on:
 --   * spell damage is reported the moment it happens
 --   * melee hits (ours and the mob's on us) are reported ~0.3-0.8s late, to
@@ -32,6 +35,7 @@ local defaults = {
     showMeleeIcon = true,      -- icon on white hits too
     iconSide     = "LEFT",     -- which side of the number the icon goes
     iconSize     = 26,
+    animation    = "rise",     -- see MOTIONS
     duration     = 1.4,        -- seconds a number stays on screen
     rise         = 70,         -- pixels the number floats upward
     colorMelee   = { 1, 1, 1 },
@@ -39,14 +43,21 @@ local defaults = {
     showAvoids   = true,       -- show Miss / Dodge / Parry...
     showSuffixes = true,       -- show "(blocked)", "(glancing)"...
     hideBlizzard = true,       -- turn off the default floating damage numbers
-    onlyMine     = true,       -- hide other players' and pets' hits
-    instant      = true,       -- show hits that clearly match our actions without waiting for threat
+    minimapButton = true,
+    minimapAngle = 225,        -- where the minimap button sits, in degrees
 }
 ns.defaults = defaults
+
+-- Where players send bug reports and ideas. Shown in the settings window and
+-- by /bdt feedback. The game can't open a browser, so it goes in a box the
+-- player can copy from.
+ns.FEEDBACK_URL = "https://github.com/hsmfromage/BetterDamageText/issues"
 
 local AUTO_ATTACK_ID = 6603
 
 local CAST_WINDOW     = 1.5  -- a cast is credited with the first matching hit within this many seconds
+local INSTANT_WINDOW  = 0.25 -- instant spells land this soon after the cast (measured: same frame)
+local AMOUNT_TOLERANCE = 0.15 -- a proc/shield/tick hit within 15% of its usual damage counts as a match
 local CHANNEL_GRACE   = 0.3  -- a channel's last tick can land just after it ends
 local TICK_INTERVAL   = 3    -- seconds between DoT ticks
 local TICK_TOLERANCE  = 0.25
@@ -191,14 +202,92 @@ local function Release(f)
     table.insert(pool, f)
 end
 
-local function Position(f)
-    local p = f.elapsed / db.duration
-    local scale = f:GetScale()
-    -- offsets are in the frame's own (scaled) units, so divide to keep them in screen pixels
-    f:SetPoint("BOTTOM", f.anchor, "TOP", f.xOffset / scale, (db.rise * p + f.push) / scale)
+-- Nameplates are protected in Forever: addons may attach to them but not
+-- measure them. When a mob dies its nameplate is hidden but stays where it
+-- was, so its numbers simply stay attached and finish their animation. If the
+-- game reuses that nameplate for another mob, the old numbers are removed
+-- (see ns.OnNamePlateAdded) so they never jump to the new mob.
+local orphaned = {} -- nameplate -> true while it's hidden after its mob died
+
+function ns.OnNamePlateRemoved(plate)
+    if plate then orphaned[plate] = true end
 end
 
+function ns.OnNamePlateAdded(plate)
+    if not plate or not orphaned[plate] then return end
+    orphaned[plate] = nil
+    for f in pairs(active) do
+        if f.anchor == plate then Release(f) end
+    end
+end
+
+-- Animation styles. Each takes a number's frame and its progress p (0 to 1)
+-- and returns its offset from the nameplate in pixels, its opacity, and an
+-- extra size multiplier. db.rise sets how far it travels.
+local function FadeAfter(p, start)
+    return p < start and 1 or (1 - p) / (1 - start)
+end
+
+local MOTIONS = {
+    -- float straight up, like Blizzard's (new numbers push older ones up)
+    rise = function(f, p)
+        return f.xOffset, db.rise * p + f.push, FadeAfter(p, 0.5)
+    end,
+    -- drop downward (new numbers push older ones down)
+    fall = function(f, p)
+        return f.xOffset, -(db.rise * p + f.push), FadeAfter(p, 0.5)
+    end,
+    -- arc out to one side, then drop
+    fountain = function(f, p)
+        return f.xOffset + f.dir * db.rise * 0.9 * p, db.rise * (3.2 * p - 3.6 * p * p), FadeAfter(p, 0.6)
+    end,
+    -- burst outward in a random upward direction, slowing down
+    scatter = function(f, p)
+        local d = db.rise * (1 - (1 - p) ^ 2)
+        return math.cos(f.angle) * d, math.sin(f.angle) * d, FadeAfter(p, 0.5)
+    end,
+    -- bounce in place, drift up a little, fade late
+    pop = function(f, p)
+        local bounce = 1
+        if not f.isCrit and f.elapsed < 0.2 then
+            bounce = 1 + 0.35 * math.sin(math.pi * f.elapsed / 0.2)
+        end
+        return f.xOffset, f.push + db.rise * 0.15 * p, FadeAfter(p, 0.7), bounce
+    end,
+}
+
+-- names shown in the settings window, in order
+ns.ANIMATIONS = {
+    { "rise",     "Rise (Blizzard-like)" },
+    { "fountain", "Fountain" },
+    { "fall",     "Fall" },
+    { "scatter",  "Scatter" },
+    { "pop",      "Pop" },
+}
+
+local function Animate(f)
+    local p = f.elapsed / db.duration
+    local motion = MOTIONS[db.animation] or MOTIONS.rise
+    local dx, dy, alpha, bounce = motion(f, p)
+
+    local scale = 1
+    if f.isCrit then
+        -- Blizzard-style crit: start huge, snap down to crit size
+        local t = math.min(f.elapsed / CRIT_POP_TIME, 1)
+        scale = db.critPop + (db.critScale - db.critPop) * t
+    end
+    scale = scale * (bounce or 1)
+    f:SetScale(scale)
+    -- offsets are in the frame's own (scaled) units, so divide to keep them in screen pixels
+    f:SetPoint("BOTTOM", f.anchor, "TOP", dx / scale, dy / scale)
+    f:SetAlpha(math.max(0, math.min(1, alpha)))
+end
+
+-- `anchor` is the nameplate (or other frame) to float above. A hidden
+-- nameplate is fine: its mob just died and it's still where the mob was.
 local function ShowHit(anchor, amount, icon, color, isCrit, suffix)
+    if not anchor then return end
+
     -- push numbers already on this enemy upward so the new one doesn't overlap them
     local lineHeight = math.max(db.fontSize, db.iconSize) + 4
     for other in pairs(active) do
@@ -213,6 +302,8 @@ local function ShowHit(anchor, amount, icon, color, isCrit, suffix)
     f.isCrit = isCrit
     f.push, f.pushTarget = 0, 0
     f.xOffset = math.random(-15, 15)
+    f.dir = math.random() < 0.5 and -1 or 1          -- fountain: which side it arcs to
+    f.angle = math.rad(math.random(25, 155))         -- scatter: direction it flies
 
     f.icon:SetTexture(icon or GetIcon(AUTO_ATTACK_ID))
     f.text:SetText(amount)  -- SetText accepts secret numbers
@@ -220,9 +311,7 @@ local function ShowHit(anchor, amount, icon, color, isCrit, suffix)
     f.suffix:SetText(db.showSuffixes and suffix or "")
     f.suffix:SetTextColor(unpack(db[color]))
 
-    f:SetScale(isCrit and db.critPop or 1)
-    f:SetAlpha(1)
-    Position(f)
+    Animate(f)
     f:Show()
     active[f] = true
 end
@@ -232,19 +321,12 @@ animator:SetScript("OnUpdate", function(_, elapsed)
     for f in pairs(active) do
         f.elapsed = f.elapsed + elapsed
         local p = f.elapsed / db.duration
-        if p >= 1 or not f.anchor:IsShown() then
+        if p >= 1 then
             Release(f)
         else
-            if f.isCrit then
-                -- Blizzard-style pop: start huge, snap down to crit size
-                local t = math.min(f.elapsed / CRIT_POP_TIME, 1)
-                f:SetScale(db.critPop + (db.critScale - db.critPop) * t)
-            end
             -- glide toward the pushed-up position instead of jumping
             f.push = f.push + (f.pushTarget - f.push) * math.min(elapsed * 15, 1)
-            Position(f)
-            -- stay fully visible for the first half, then fade out
-            f:SetAlpha(p < 0.5 and 1 or (1 - p) * 2)
+            Animate(f)
         end
     end
 end)
@@ -269,6 +351,10 @@ local function GetSpellData(spellID)
         end
     end
     data.dot = tonumber(desc:match("damage over (%d+) sec"))
+    -- the direct damage it lists: "19 to 22 Nature damage" or "25 Fire damage"
+    local low, high = desc:match("(%d+) to (%d+)")
+    low = tonumber(low or desc:match("(%d+) %a* ?damage"))
+    data.minDamage, data.maxDamage = low, tonumber(high) or low
     spellInfo[spellID] = data
     return data
 end
@@ -323,10 +409,20 @@ local lastCast          -- { spellID, school, time, credited = { unit = true } }
 local channel           -- { spellID, school, endTime }
 local dots = {}         -- spellID -> { school, duration, times = { cast times } }
 local schoolSpell = {}  -- school -> last spell of ours that hit with it (fallback icon)
-local procAmount = {}   -- school -> last weapon proc damage (tells procs from DoT ticks)
-local tickAmount = {}   -- spellID -> last DoT tick damage
 local autoAttacking = false
-local lastMainHandSwing, lastOffHandSwing = 0, 0
+local autoAttackEnded = 0 -- when auto attack last switched off
+
+-- Auto attack switches off the moment the mob dies, but the killing swing is
+-- reported ~0.6s later, so a swing just after it stopped still counts.
+local function Attacking(now)
+    return autoAttacking or now - autoAttackEnded < 1.5
+end
+local lastSwing = { main = 0, off = 0 } -- when each hand's last confirmed swing landed
+
+-- Damage our procs, shields, DoT ticks and channels usually do, learned from
+-- hits our threat confirmed. Saved between sessions. Keys: "proc:4", "shield:8",
+-- "tick:<spellID>", "channel:<spellID>".
+local learned
 
 -- Returns true for casts that never hit a mob themselves (shields, weapon
 -- enchants), after noting their effect.
@@ -383,21 +479,30 @@ local function DotTicking(school, now)
     end
 end
 
--- Our white swings land on a fixed rhythm (weapon speed). Only used when
--- threat can't be read: a physical hit before our weapon is ready isn't ours.
-local function FitsSwingTimer(now)
-    if not autoAttacking then return false end
-    local mh, oh = UnitAttackSpeed("player")
-    if not mh or IsSecret(mh) then return true end
-    if now >= lastMainHandSwing + mh - SWING_TOLERANCE then
-        lastMainHandSwing = now
-        return true
-    end
-    if oh and not IsSecret(oh) and now >= lastOffHandSwing + oh - SWING_TOLERANCE then
-        lastOffHandSwing = now
-        return true
-    end
-    return false
+-- Does this damage match what this source usually does?
+local function MatchesLearned(key, base)
+    local usual = base and learned[key]
+    return usual ~= nil and math.abs(base - usual) <= math.max(1, usual * AMOUNT_TOLERANCE)
+end
+
+-- Does this damage fit the range in the spell's description? Spell power and
+-- level differences move it a bit, so the range is widened. Physical spells
+-- (Heroic Strike...) describe a bonus, not their damage, so they always fit.
+local function FitsSpellRange(spellID, school, base)
+    local data = GetSpellData(spellID)
+    -- no amount to check: a full resist/immune, or a hidden number
+    if base == nil or school == SCHOOL_PHYSICAL or not (data and data.minDamage) then return true end
+    return base >= data.minDamage * 0.7 and base <= data.maxDamage * 1.3 + 10
+end
+
+-- Weapon procs happen the moment a swing lands, but the swing itself is
+-- reported ~0.5-0.8s later, so a proc comes shortly before our next swing is
+-- due to be reported. Before we know our swing rhythm, any time fits.
+local function FitsProcTiming(now)
+    local mh = UnitAttackSpeed("player")
+    if not mh or IsSecret(mh) or now - lastSwing.main > mh * 2 then return true end
+    local untilSwing = lastSwing.main + mh - now
+    return untilSwing > -0.1 and untilSwing < 1.3
 end
 
 -- true only if `amount` is clearly closer to a than to b; with either unknown, false
@@ -406,66 +511,132 @@ local function Closer(amount, a, b)
     return math.abs(amount - a) < math.abs(amount - b)
 end
 
--- Decide which of our spells caused a hit. Returns icon, color, mine, label;
--- `mine` is our best guess at ownership, used when threat can't tell us.
+-- Which hand swung? Each hand lands on its own rhythm (its weapon speed), so
+-- pick the hand whose next swing was due closest to this one. Only fed with
+-- swings our threat confirmed, so other players' hits can't throw it off.
+local function AssignHand(t)
+    local mh, oh = UnitAttackSpeed("player")
+    if not oh or IsSecret(oh) or IsSecret(mh) then
+        lastSwing.main = t
+        return "main"
+    end
+    local mainOff = math.abs(t - (lastSwing.main + mh))
+    local offOff = math.abs(t - (lastSwing.off + oh))
+    local hand = offOff < mainOff and "off" or "main"
+    lastSwing[hand] = t
+    return hand
+end
+
+-- Is one of our weapons due to swing now? (for misses, which raise no threat)
+local function SwingDue(t)
+    if not Attacking(t) then return false end
+    local mh, oh = UnitAttackSpeed("player")
+    if IsSecret(mh) then return true end
+    for hand, speed in pairs({ main = mh, off = (not IsSecret(oh)) and oh or nil }) do
+        if speed and t >= lastSwing[hand] + speed - SWING_TOLERANCE then
+            lastSwing[hand] = t
+            return true
+        end
+    end
+    return false
+end
+
+-- Decide what caused a hit. Returns a table:
+--   icon, color, label
+--   certain  - so clearly ours (timing, school and usual amount all match) that
+--              it can be shown without waiting for the threat check
+--   likely   - plausibly ours; only used for a killing blow, whose threat is never seen
+--   key      - which learned amount this kind of hit updates once confirmed
+--   cast     - the cast this hit is credited to, marked used once it's shown
+--   melee    - a white hit (its weapon icon is picked when it's shown)
 local function Attribute(unit, school, amount, isCrit, now)
     local physical = school == SCHOOL_PHYSICAL
-    -- damage without the crit bonus, for comparing with earlier hits
+    -- damage without the crit bonus, for comparing with what this source usually does
     local base = not IsSecret(amount) and amount > 0 and (isCrit and amount / 1.5 or amount) or nil
 
-    -- 1. the spell we just cast (once per mob, matching school)
+    -- 1. the spell we just cast (once per mob, matching school). Instant
+    -- spells land the moment they're cast, so a hit right then is certain.
     if lastCast and now - lastCast.time <= CAST_WINDOW and not lastCast.credited[unit]
         and (lastCast.school == nil or lastCast.school == school) then
-        lastCast.credited[unit] = true
         if not physical then schoolSpell[school] = lastCast.spellID end
-        return GetIcon(lastCast.spellID), COLOR_SPELL, true, "cast " .. SpellName(lastCast.spellID)
+        return { icon = GetIcon(lastCast.spellID), color = COLOR_SPELL, cast = lastCast, likely = true,
+                 certain = lastCast.school ~= nil and now - lastCast.time <= INSTANT_WINDOW
+                     and FitsSpellRange(lastCast.spellID, school, base),
+                 label = "cast " .. SpellName(lastCast.spellID) }
     end
 
     -- 2. a spell we're channelling
     if channel and now <= channel.endTime + CHANNEL_GRACE and (channel.school == nil or channel.school == school) then
-        return GetIcon(channel.spellID), COLOR_SPELL, true, "channel " .. SpellName(channel.spellID)
+        local key = "channel:" .. channel.spellID
+        return { icon = GetIcon(channel.spellID), color = COLOR_SPELL, key = key, likely = true,
+                 certain = MatchesLearned(key, base), label = "channel " .. SpellName(channel.spellID) }
     end
 
-    -- 3. a DoT tick or a weapon proc. If both fit, compare with the damage each
-    -- did last time; amounts are only learned when there was no doubt.
+    -- 3. a DoT tick or a weapon proc; if both fit, the usual amounts decide
     local dot = DotTicking(school, now)
-    local proc = not physical and autoAttacking and weaponProcs[school]
-    local learn = base and not (dot and proc)
-    if dot and proc and Closer(base, procAmount[school], tickAmount[dot]) then
+    local proc = not physical and Attacking(now) and weaponProcs[school]
+    if dot and proc and Closer(base, learned["proc:" .. school], learned["tick:" .. dot]) then
         dot = nil
     end
     if dot then
-        if learn then tickAmount[dot] = base end
-        return GetIcon(dot), COLOR_SPELL, true, "dot " .. SpellName(dot)
+        local key = "tick:" .. dot
+        return { icon = GetIcon(dot), color = COLOR_SPELL, key = key, likely = true,
+                 certain = MatchesLearned(key, base), label = "dot " .. SpellName(dot) }
     end
     if proc then
-        if learn then procAmount[school] = base end
-        return proc, COLOR_SPELL, true, "weapon proc"
+        local key = "proc:" .. school
+        return { icon = proc, color = COLOR_SPELL, key = key, likely = true,
+                 certain = MatchesLearned(key, base) and FitsProcTiming(now), label = "weapon proc" }
     end
 
+    -- 4. a white hit: only ever ours on our target, and always threat-checked
     if physical then
-        return GetIcon(AUTO_ATTACK_ID), COLOR_MELEE, FitsSwingTimer(now), "melee"
+        return { icon = GetIcon(AUTO_ATTACK_ID), color = COLOR_MELEE, melee = true,
+                 likely = unit == "target" and Attacking(now), label = "melee" }
     end
 
-    -- 4. magic damage nothing else explains: a damage shield, if one is up
+    -- 5. a damage shield, which only fires when the mob hits us
     if shields[school] then
-        -- a shield only fires when the mob hits us, so it's only clearly ours if
-        -- the mob is attacking us (unknown counts as yes)
         local ok, onMe = pcall(UnitIsUnit, unit .. "target", "player")
-        local mine = not ok or IsSecret(onMe) or onMe
-        return shields[school], COLOR_SPELL, mine, "shield"
+        onMe = not ok or IsSecret(onMe) or onMe
+        local key = "shield:" .. school
+        return { icon = shields[school], color = COLOR_SPELL, key = key, likely = onMe,
+                 certain = onMe and MatchesLearned(key, base), label = "shield" }
     end
 
-    -- 5. unknown: guess the spell of ours that last hit with this school
+    -- 6. unknown magic damage: only shown if threat proves it's ours
     local spellID = schoolSpell[school]
-    return GetIcon(spellID or AUTO_ATTACK_ID), COLOR_SPELL, false, "unknown, guessed " .. tostring(spellID)
+    return { icon = GetIcon(spellID or AUTO_ATTACK_ID), color = COLOR_SPELL,
+             label = "unknown, guessed " .. tostring(spellID) }
+end
+
+---------------------------------------------------------------------------
+-- Showing a hit
+---------------------------------------------------------------------------
+local function Display(hit)
+    if hit.shown then return end
+    hit.shown = true
+    if hit.cast then hit.cast.credited[hit.unit] = true end
+    if hit.melee and hit.landed then
+        local hand = AssignHand(hit.time)
+        hit.icon = GetInventoryItemTexture("player", hand == "off" and 17 or 16) or hit.icon
+    end
+    ShowHit(hit.anchor, hit.amount, hit.icon, hit.color, hit.isCrit, hit.suffix)
+end
+
+-- A hit our threat proved is ours: remember its amount for next time.
+-- Crits and partial (resisted...) hits aren't typical, so they're not learned.
+local function Learn(hit)
+    if hit.key and hit.base and not hit.isCrit and not hit.suffix then
+        learned[hit.key] = hit.base
+    end
 end
 
 ---------------------------------------------------------------------------
 -- Ownership by threat (target only)
 --
 -- Only our own damage raises our threat. Hits on our target wait a moment for
--- our threat to rise; hits that never raise it were someone else's.
+-- our threat to rise; hits that never raise it aren't ours and are never shown.
 ---------------------------------------------------------------------------
 local threat -- { value, credit, creditTime, hits = {} } for "target"
 
@@ -481,14 +652,6 @@ local function ResetThreat()
     threat = value and { value = value, credit = 0, creditTime = 0, hits = {} } or nil
 end
 
-local function Display(hit)
-    if hit.shown then return end -- already shown in instant mode
-    hit.shown = true
-    if hit.anchor:IsShown() then
-        ShowHit(hit.anchor, hit.amount, hit.icon, hit.color, hit.isCrit, hit.suffix)
-    end
-end
-
 local function ProcessThreat(now)
     if not threat then return end
     local value = ReadThreat()
@@ -501,36 +664,44 @@ local function ProcessThreat(now)
         threat.value = value
     end
 
-    -- Spend the rise on waiting hits, oldest first, letting hits that fit our
-    -- own pattern (hit.mine) claim it before anyone else's. Melee hits are
-    -- reported after their threat arrives, so leftover rise is kept for a moment.
+    -- Spend the rise on waiting hits, oldest first, letting the hits most likely
+    -- to be ours claim it first. Melee hits are reported after their threat
+    -- arrives, so leftover rise is kept for a moment.
     for _, pass in ipairs({ true, false }) do
         for _, hit in ipairs(threat.hits) do
             local secret = IsSecret(hit.amount)
-            if not hit.done and (hit.mine or false) == pass and threat.credit > 0
+            if not hit.done and (hit.likely or false) == pass and threat.credit > 0
                 and (secret or threat.credit >= hit.amount * MIN_THREAT_PER_DAMAGE) then
                 Debug("confirmed", hit.label, string.format("after %.2fs", now - hit.time))
-                Display(hit)
                 hit.done = true
+                Learn(hit)
+                Display(hit)
                 threat.credit = secret and 0 or math.max(0, threat.credit - hit.amount)
             end
         end
     end
 
+    -- A dead mob's threat list is wiped, so the killing blow (and any hit still
+    -- waiting) will never see a rise. Decide those straight away by their timing.
+    local dead = UnitIsDead("target")
+    dead = not IsSecret(dead) and dead
+
     local waiting = {}
     for _, hit in ipairs(threat.hits) do
         if hit.done then
-            -- shown above
-        elseif now - hit.time > THREAT_WAIT then
-            -- a dead mob's threat list is wiped, so a killing blow never shows a rise
-            local dead = UnitIsDead("target")
-            if hit.shown then
-                Debug("shown instantly but threat didn't rise:", hit.label, "- probably someone else's")
-            elseif hit.mine and not IsSecret(dead) and dead then
-                Debug("shown", hit.label, "- killing blow, judged by timing")
+            -- confirmed above
+        elseif dead then
+            -- a white hit only counts if one of our weapons was due to swing
+            local ours = hit.likely and (not hit.melee or SwingDue(hit.time))
+            if not hit.shown and ours then
+                Debug("shown", hit.label, "- killing blow")
                 Display(hit)
-            else
-                Debug("dropped", hit.label, "- threat didn't rise")
+            elseif not hit.shown then
+                Debug("dropped", hit.label, "- mob died, not ours")
+            end
+        elseif now - hit.time > THREAT_WAIT then
+            if not hit.shown then
+                Debug("dropped", hit.label, "- threat didn't rise, not ours")
             end
         else
             table.insert(waiting, hit)
@@ -541,9 +712,18 @@ local function ProcessThreat(now)
     if now - threat.creditTime > CREDIT_KEEP then threat.credit = 0 end
 end
 
+-- Our target's nameplate, remembered so hits reported just after it was hidden
+-- (the late killing swing) can still be attached to it, where the mob died.
+local lastTargetPlate, lastTargetPlateTime = nil, 0
+
 local threatFrame = CreateFrame("Frame")
 threatFrame:SetScript("OnUpdate", function()
-    ProcessThreat(GetTime())
+    local now = GetTime()
+    local plate = C_NamePlate.GetNamePlateForUnit("target")
+    if plate then
+        lastTargetPlate, lastTargetPlateTime = plate, now
+    end
+    ProcessThreat(now)
 end)
 
 ---------------------------------------------------------------------------
@@ -575,16 +755,30 @@ local HIT_SUFFIXES = {
 local function OnEnemyHit(unit, action, flags, amount, school)
     if IsSecret(action) or (action ~= "WOUND" and not AVOID_TEXT[action]) then return end
     if action ~= "WOUND" and not db.showAvoids then return end
+    -- Next-swing abilities (Maul, Heroic Strike, Raptor Strike...) report an
+    -- empty 0 "wound" the moment they fire, before the real hit. Left in, it
+    -- takes the cast's credit and shows up as a 0 with the spell's icon, and
+    -- the real hit then loses its icon. Must run before Attribute().
+    -- Thanks to the CurseForge commenter who tracked this down.
+    if action == "WOUND" and not IsSecret(amount) and (amount or 0) <= 0 then
+        Debug("ignored", unit, "0 damage wound")
+        return
+    end
     if IsSecret(flags) then flags = nil end
     if IsSecret(school) or not school then school = SCHOOL_PHYSICAL end
-    local hostile = UnitCanAttack("player", unit)
-    if not IsSecret(hostile) and not hostile then return end
+    local now = GetTime()
+    local hostile, dead = UnitCanAttack("player", unit), UnitIsDead(unit)
+    if not IsSecret(hostile) and not hostile and not (not IsSecret(dead) and dead) then return end
 
     -- Every hit on our target fires twice: as "target" and as its nameplate.
     -- Use the "target" one, since that's the only unit we can read threat on.
     local anchor
     if unit == "target" then
-        anchor = C_NamePlate.GetNamePlateForUnit("target") or TargetFrame
+        anchor = C_NamePlate.GetNamePlateForUnit("target")
+        if not anchor and lastTargetPlate and orphaned[lastTargetPlate] and now - lastTargetPlateTime < 3 then
+            anchor = lastTargetPlate -- its nameplate was just hidden (it died): stay where it was
+        end
+        anchor = anchor or TargetFrame
     else
         anchor = C_NamePlate.GetNamePlateForUnit(unit)
         if anchor and anchor == C_NamePlate.GetNamePlateForUnit("target") then
@@ -593,44 +787,47 @@ local function OnEnemyHit(unit, action, flags, amount, school)
     end
     if not anchor then return end
 
-    local now = GetTime()
     local landed = action == "WOUND"
     local isCrit = landed and flags == "CRITICAL"
-    local icon, color, mine, label = Attribute(unit, school, landed and amount or 0, isCrit, now)
+    local hit = Attribute(unit, school, landed and amount or 0, isCrit, now)
+    hit.anchor, hit.unit, hit.time, hit.landed = anchor, unit, now, landed
+    hit.label = hit.label .. " (" .. (landed and (IsSecret(amount) and "?" or amount) or action) .. ")"
 
-    local hit = { anchor = anchor, icon = icon, color = color, time = now, mine = mine,
-                  label = label .. " (" .. (landed and (IsSecret(amount) and "?" or amount) or action) .. ")" }
-    if landed then
-        hit.amount = amount
-        hit.isCrit = isCrit
-        for _, s in ipairs(HIT_SUFFIXES) do
-            if flags and flags:find(s.flag, 1, true) then
-                hit.suffix = s.text
-                break
-            end
-        end
-    else
+    if not landed then
+        -- misses raise no threat: a melee miss is ours if one of our weapons was
+        -- due, a spell miss if it came the instant we cast
         hit.amount = AVOID_TEXT[action]
+        if (hit.melee and unit == "target" and SwingDue(now)) or (hit.cast and hit.certain) then
+            Debug("shown", hit.label, "- miss matches our swing or cast")
+            Display(hit)
+        else
+            Debug("dropped", hit.label, "- miss not ours")
+        end
+        return
     end
 
-    if not db.onlyMine then
-        Debug("shown", hit.label, "- filter off")
-        Display(hit)
-    elseif landed and unit == "target" and threat then
-        if db.instant and mine then
-            -- clearly ours: show now; it still goes through the threat check
-            -- so its threat rise isn't credited to someone else's hit
-            Debug("shown", hit.label, "- instant")
-            Display(hit)
+    hit.amount = amount
+    hit.isCrit = isCrit
+    hit.base = not IsSecret(amount) and amount > 0 and (isCrit and amount / 1.5 or amount) or nil
+    for _, s in ipairs(HIT_SUFFIXES) do
+        if flags and flags:find(s.flag, 1, true) then
+            hit.suffix = s.text
+            break
         end
-        table.insert(threat.hits, hit)
-        ProcessThreat(now) -- the threat may already have risen this frame
-    elseif mine then
-        -- misses cause no threat, and other mobs' threat can't be read: go by timing
-        Debug("shown", hit.label, "- by timing")
+    end
+
+    if hit.certain then
+        Debug("shown", hit.label, "- certain")
         Display(hit)
-    else
-        Debug("dropped", hit.label, "- by timing")
+    end
+    if unit == "target" and threat then
+        -- Everything on our target goes through the threat check: uncertain hits
+        -- are shown once it confirms them, and certain ones still use up their
+        -- share of the rise so it can't vouch for someone else's hit.
+        table.insert(threat.hits, hit)
+        ProcessThreat(now)
+    elseif not hit.certain then
+        Debug("dropped", hit.label, "- can't be confirmed as ours")
     end
 end
 
@@ -678,6 +875,8 @@ ev:RegisterEvent("PLAYER_REGEN_ENABLED") -- left combat: buffs and tooltips are 
 ev:RegisterEvent("PLAYER_ENTER_COMBAT")  -- auto attack switched on
 ev:RegisterEvent("PLAYER_LEAVE_COMBAT")  -- auto attack switched off
 ev:RegisterEvent("PLAYER_TARGET_CHANGED")
+ev:RegisterEvent("NAME_PLATE_UNIT_ADDED")
+ev:RegisterEvent("NAME_PLATE_UNIT_REMOVED")
 ev:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
 ev:RegisterUnitEvent("UNIT_SPELLCAST_CHANNEL_START", "player")
 ev:RegisterUnitEvent("UNIT_SPELLCAST_CHANNEL_STOP", "player")
@@ -701,6 +900,8 @@ ev:SetScript("OnEvent", function(_, event, ...)
             end
         end
         ns.db = db
+        BetterDamageTextLearned = BetterDamageTextLearned or {}
+        learned = BetterDamageTextLearned
     elseif event == "PLAYER_ENTERING_WORLD" or event == "PLAYER_REGEN_ENABLED" then
         -- re-applied on every load screen in case Blizzard's settings reset it
         ApplyBlizzardSetting()
@@ -711,12 +912,17 @@ ev:SetScript("OnEvent", function(_, event, ...)
         UpdateDamageShields()
     elseif event == "UNIT_INVENTORY_CHANGED" then
         UpdateWeaponProcs()
+    elseif event == "NAME_PLATE_UNIT_REMOVED" then
+        ns.OnNamePlateRemoved(C_NamePlate.GetNamePlateForUnit(...))
+    elseif event == "NAME_PLATE_UNIT_ADDED" then
+        ns.OnNamePlateAdded(C_NamePlate.GetNamePlateForUnit(...))
     elseif event == "PLAYER_TARGET_CHANGED" then
         ResetThreat()
     elseif event == "PLAYER_ENTER_COMBAT" then
         autoAttacking = true
     elseif event == "PLAYER_LEAVE_COMBAT" then
         autoAttacking = false
+        autoAttackEnded = GetTime()
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
         local _, _, spellID = ...
         OnCast(spellID)
@@ -783,14 +989,6 @@ SlashCmdList.BETTERDAMAGETEXT = function(msg)
     cmd = cmd:lower()
     if cmd == "" or cmd == "config" or cmd == "options" then
         ns.OpenOptions()
-    elseif cmd == "mine" then
-        if val == "on" then
-            db.onlyMine = true
-        elseif val == "off" then
-            db.onlyMine = false
-        end
-        print("BetterDamageText: " .. (db.onlyMine and "only showing your own hits" or "showing everyone's hits") ..
-            ". Use /bdt mine on or /bdt mine off to change.")
     elseif cmd == "blizzard" then
         db.hideBlizzard = not db.hideBlizzard
         ApplyBlizzardSetting(true)
@@ -799,26 +997,36 @@ SlashCmdList.BETTERDAMAGETEXT = function(msg)
         UpdateDamageShields()
         UpdateWeaponProcs()
         print("BetterDamageText: debug " .. (debugMode and "on" or "off") ..
-            ". Only your hits: " .. (db.onlyMine and "on" or "off") ..
             ". Damage shields (school): " .. Schools(shields) .. ". Weapon enchants (school): " .. Schools(weaponProcs))
     elseif cmd == "record" then
         recording = not recording
         if recording then
             BetterDamageTextLog = {}
-            Debug("start: onlyMine", db.onlyMine, "shields", Schools(shields), "weapon procs", Schools(weaponProcs))
+            local usual = {}
+            for key, amount in pairs(learned) do table.insert(usual, key .. "=" .. amount) end
+            Debug("start: shields", Schools(shields), "weapon procs", Schools(weaponProcs),
+                "usual amounts", table.concat(usual, " "))
             print("BetterDamageText: recording. Fight for a bit, then type /bdt record again and /reload to save.")
         else
             print("BetterDamageText: stopped recording (" .. #BetterDamageTextLog .. " lines). /reload to save them to disk.")
         end
     elseif cmd == "test" then
         ns.Preview()
+    elseif cmd == "minimap" then
+        db.minimapButton = not db.minimapButton
+        ns.UpdateMinimapButton()
+        print("BetterDamageText: minimap button " .. (db.minimapButton and "shown" or "hidden") .. ".")
+    elseif cmd == "feedback" or cmd == "bug" then
+        print("BetterDamageText: report bugs and suggest ideas at " .. ns.FEEDBACK_URL)
+        ns.ShowFeedback() -- opens the settings with the link selected, ready to copy
     else
         print("BetterDamageText commands:")
         print("  /bdt               - open the settings window")
         print("  /bdt test          - show some sample hits")
-        print("  /bdt mine on|off   - hide other players' hits (now " .. (db.onlyMine and "on" or "off") .. ")")
+        print("  /bdt minimap       - show or hide the minimap button")
         print("  /bdt blizzard      - toggle Blizzard's own damage numbers")
         print("  /bdt debug         - print every hit and why it was shown or hidden")
         print("  /bdt record        - start/stop saving that output to disk (read after /reload)")
+        print("  /bdt feedback      - where to report bugs and suggest ideas")
     end
 end

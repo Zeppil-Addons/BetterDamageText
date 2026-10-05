@@ -12,10 +12,11 @@ Built for **World of Warcraft: Forever**.
   - **Damage shields:** Lightning Shield, Thorns, Fire Shield, Retribution Aura.
   - **Damage over time:** ticks get the icon of the spell that applied them.
   - **Channelled spells.**
-- **Only your damage.** Other players' and pets' hits on your target are filtered out.
+- **Dual wield aware:** white hits show the icon of the weapon that actually swung.
 - **Blizzard-style crits:** they pop in big and settle at a larger size.
 - **No overlapping:** new numbers push older ones up.
 - **Misses, dodges, parries and partial hits:** "Miss", "Parry", "(blocked)", "(glancing)" and so on.
+- **10 bold fonts included** (Luckiest Guy, Bangers, Titan One, Bowlby One and more), plus the game's own fonts.
 - **White melee hits** are shown in white, spells and procs in yellow. Both colours can be changed.
 
 ## Settings
@@ -24,19 +25,15 @@ Type **/bdt**, or go to **Options → AddOns → Better Damage Text**.
 
 | Section | Settings |
 |---|---|
-| **Text** | Font (including the game's bold fonts, or your own `.ttf`), outline, drop shadow, font size, crit size, crit "pop" size |
+| **Presets** | One-click looks: Blizzard, Big & Bold, Fountain, Arcade, Minimal |
+| **Text** | Font (10 bundled bold fonts plus the game's own), outline, drop shadow, font size, crit size, crit "pop" size |
+| **Animation** | Style (Rise, Fountain, Fall, Scatter, Pop), time on screen, distance |
 | **Icon** | Show or hide, icon on white hits on or off, left or right of the number, size |
-| **Animation** | Time on screen, float distance |
 | **Colours** | Melee colour, spell colour |
-| **Show** | Misses and dodges, partial-hit labels, only my hits, instant mode, hide Blizzard's numbers |
+| **Show** | Misses and dodges, partial-hit labels, hide Blizzard's numbers, minimap button |
+| **Feedback** | A link for bug reports and ideas, ready to copy |
 
-Changes save automatically, and each one shows a short preview.
-
-### Using your own font
-
-1. Put a `.ttf` file in `Interface\AddOns\BetterDamageText\Fonts\`.
-2. Fully restart the game.
-3. Type the file name in **"Your own font"** in `/bdt`, then press **Use**.
+Changes save automatically, and each one shows a short preview. The minimap button opens the settings with a left-click and shows a preview with a right-click.
 
 Any fonts shared by other addons through LibSharedMedia also appear in the font list.
 
@@ -46,10 +43,11 @@ Any fonts shared by other addons through LibSharedMedia also appear in the font 
 |---|---|
 | `/bdt` | Open the settings window |
 | `/bdt test` | Show some sample hits |
-| `/bdt mine on` / `off` | Only show your own hits |
+| `/bdt minimap` | Show or hide the minimap button |
 | `/bdt blizzard` | Turn Blizzard's own damage numbers on or off |
 | `/bdt debug` | Print every hit and why it was shown or hidden |
 | `/bdt record` | Save that output to disk, for bug reports |
+| `/bdt feedback` | Show where to report bugs and suggest ideas |
 
 ## How it works
 
@@ -57,21 +55,19 @@ WoW: Forever doesn't let addons read the combat log, so no addon can be told dir
 - the damage each mob takes, and its damage type
 - the spells you cast, and the damage type and duration in each spell's description
 - the steady 3-second rhythm of DoT ticks
-- your weapon enchants and shield buffs
-- your threat on your target, which only rises from your own damage
+- your weapon enchants and shield buffs, and how much they usually hit for
+- your threat on your target
 
 ## Known limitations
 
 - **English game client only, for now.** Spell and buff names are matched in English.
-- **Other mobs:** threat can only be read on your current target. On other mobs, other players' hits are filtered by timing, which is less exact.
-- **Instant mode:** another player's hit that looks exactly like one of yours can occasionally show, e.g. a fire spell landing while you auto-attack with Flametongue. Turn off **Instant** for strict filtering, with a short delay.
-- **Off-hand swings** show the main-hand weapon icon.
 - **No exact blocked or resisted amounts.** The game doesn't give addons those numbers, so partial hits show "(blocked)" without the amount.
-- **Melee numbers appear just after the swing,** because the game reports melee hits late to match the swing animation. Blizzard's own numbers did the same.
 
-## Bug reports
+## Feedback and bug reports
 
-Please include:
+Found a bug or have an idea? Open an issue at https://github.com/hsmfromage/BetterDamageText/issues, or leave a comment on the CurseForge page. In game, type `/bdt feedback` to get the link ready to copy.
+
+For bugs, please include:
 1. What you expected and what you saw.
 2. A recording: type `/bdt record`, reproduce the problem, type `/bdt record` again, then `/reload`.
 3. The log file: `WTF\Account\<your account>\SavedVariables\BetterDamageText.lua`.
