@@ -18,7 +18,7 @@
 --   * melee hits (ours and the mob's on us) are reported ~0.3-0.8s late, to
 --     line up with the swing animation, so a Flametongue proc or Lightning
 --     Shield zap arrives BEFORE the swing that caused it
---   * DoTs tick exactly every 3s after the cast
+--   * DoTs tick exactly every 3s after the cast (a few every 2s, see DOT_INTERVALS)
 --   * threat can only be read on "target", not on nameplate units
 
 local ADDON, ns = ... -- ns is shared with Options.lua
@@ -59,8 +59,19 @@ local CAST_WINDOW     = 1.5  -- a cast is credited with the first matching hit w
 local INSTANT_WINDOW  = 0.25 -- instant spells land this soon after the cast (measured: same frame)
 local AMOUNT_TOLERANCE = 0.15 -- a proc/shield/tick hit within 15% of its usual damage counts as a match
 local CHANNEL_GRACE   = 0.3  -- a channel's last tick can land just after it ends
-local TICK_INTERVAL   = 3    -- seconds between DoT ticks
+local TICK_INTERVAL   = 3    -- seconds between DoT ticks, unless listed below
 local TICK_TOLERANCE  = 0.25
+
+-- DoTs that don't tick every 3s (spell name -> seconds between ticks). Keyed
+-- by name so every rank matches. Ticks that miss the expected rhythm fall
+-- through to "unknown magic damage" and get the wrong icon.
+local DOT_INTERVALS = {
+    ["Curse of Agony"] = 2,
+    ["Bane of Agony"]  = 2,
+    ["Rupture"]        = 2,
+    ["Insect Swarm"]   = 2,
+    ["Rip"]            = 2,
+}
 local THREAT_WAIT     = 1.5  -- how long a hit waits for our threat to rise before it's judged not ours
                              -- (measured: up to 1.2s after a proc or shield hit, in step with the late swing)
 local CREDIT_KEEP     = 1.0  -- how long a threat rise waits for its (late) melee hit event
@@ -407,7 +418,7 @@ end
 ---------------------------------------------------------------------------
 local lastCast          -- { spellID, school, time, credited = { unit = true } }
 local channel           -- { spellID, school, endTime }
-local dots = {}         -- spellID -> { school, duration, times = { cast times } }
+local dots = {}         -- spellID -> { school, duration, interval, times = { cast times } }
 local schoolSpell = {}  -- school -> last spell of ours that hit with it (fallback icon)
 local autoAttacking = false
 local autoAttackEnded = 0 -- when auto attack last switched off
@@ -452,7 +463,9 @@ local function OnCast(spellID)
     local now = GetTime()
     lastCast = { spellID = spellID, school = data and data.school, time = now, credited = {} }
     if data and data.dot then
-        local d = dots[spellID] or { school = data.school, duration = data.dot, times = {} }
+        local name = SpellName(spellID)
+        local d = dots[spellID] or { school = data.school, duration = data.dot, times = {},
+                                     interval = not IsSecret(name) and DOT_INTERVALS[name] or TICK_INTERVAL }
         dots[spellID] = d
         -- forget casts whose DoT has run out
         for i = #d.times, 1, -1 do
@@ -462,15 +475,16 @@ local function OnCast(spellID)
     end
 end
 
--- Is `now` exactly on one of this DoT's 3-second ticks?
+-- Is `now` exactly on one of this DoT's ticks?
 local function DotTicking(school, now)
     for spellID, d in pairs(dots) do
         if d.school == school then
+            local interval = d.interval or TICK_INTERVAL
             for _, t in ipairs(d.times) do
                 local dt = now - t
-                if dt > TICK_INTERVAL - TICK_TOLERANCE and dt < d.duration + TICK_TOLERANCE then
-                    local phase = dt % TICK_INTERVAL
-                    if phase < TICK_TOLERANCE or phase > TICK_INTERVAL - TICK_TOLERANCE then
+                if dt > interval - TICK_TOLERANCE and dt < d.duration + TICK_TOLERANCE then
+                    local phase = dt % interval
+                    if phase < TICK_TOLERANCE or phase > interval - TICK_TOLERANCE then
                         return spellID
                     end
                 end
